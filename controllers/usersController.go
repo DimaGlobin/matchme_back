@@ -8,10 +8,11 @@ import (
 
 	"github.com/DimaGlobin/matchme/initializers"
 	"github.com/DimaGlobin/matchme/models"
+	"github.com/DimaGlobin/matchme/utils"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
-	"gorm.io/gorm"
+	_ "gorm.io/driver/postgres"
 )
 
 func SignUp(c *gin.Context) {
@@ -40,7 +41,8 @@ func SignUp(c *gin.Context) {
 		return
 	}
 	//Create the user
-	user := models.User{Email: body.Email, Password: string(hash), Sex: body.Sex}
+
+	user := models.User{Email: body.Email, Password: string(hash), Sex: body.Sex, Location: body.Location}
 	result := initializers.DB.Create(&user)
 
 	if result.Error != nil {
@@ -124,7 +126,7 @@ func Validate(c *gin.Context) {
 	})
 }
 
-func getUserFromReq(c *gin.Context) *models.User {
+func getUserFromReq(c *gin.Context) (*models.User, interface{}) {
 	//Get the cookie of request
 
 	tokenString, err := c.Cookie("Authorization")
@@ -168,31 +170,42 @@ func getUserFromReq(c *gin.Context) *models.User {
 
 		fmt.Println(claims["foo"], claims["nbf"])
 
-		return &user
+		retClaim := claims["sub"]
+
+		return &user, retClaim
 	} else {
 		c.AbortWithStatus(http.StatusUnauthorized)
-		return nil
+		return nil, nil
 	}
 }
 
 func ShowRandomUser(c *gin.Context) {
 
-	user := *(getUserFromReq(c))
+	var user *models.User
+	user, _ = getUserFromReq(c)
 	var RateUser models.User
 
-	var result *gorm.DB
+	subQuery := fmt.Sprintf(`
+        SELECT unnest(array_cat(liked, disliked)) FROM users WHERE id = %d
+    `, user.ID)
 
-	if user.Sex == "male" {
-		result = initializers.DB.Where("sex = ?", "female").Order("RANDOM()").First(&RateUser)
-	} else if user.Sex == "female" {
-		result = initializers.DB.Where("sex = ?", "male").Order("RANDOM()").First(&RateUser)
-	}
+	// Выбираем случайного пользователя другого пола, которого еще не оценили
+	rows, err := initializers.DB.Raw(
+		"SELECT * FROM users WHERE sex != ? AND id != ? AND id NOT IN ("+subQuery+") AND deleted_at IS NULL ORDER BY RANDOM() LIMIT 1",
+		user.Sex, user.ID,
+	).Rows()
 
-	if result.Error != nil {
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Failed to find random user",
 		})
 		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		initializers.DB.ScanRows(rows, &RateUser)
+		break // Выход из цикла после первой строки
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -200,40 +213,77 @@ func ShowRandomUser(c *gin.Context) {
 	})
 }
 
-func checkAnswer(ans string) bool {
-	if ans == "like" || ans == "dislike" {
-		return true
-	} else {
-		return false
-	}
-}
-
 func HandleReaction(c *gin.Context) {
-	userFromReq := getUserFromReq(c)
+	_, claim := getUserFromReq(c)
+
 	var user models.User
+	var RateUser models.User
 
 	var body struct {
 		ProfileID int    `json:"profile_id" binding:"required"`
 		Answer    string `json:"answer" binding:"required"`
 	}
 
-	if !checkAnswer(body.Answer) {
+	if c.Bind(&body) != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Unavailable answer",
+			"error": "Failed to read body",
+		})
+
+		return
+	}
+
+	initializers.DB.First(&user, claim)
+	initializers.DB.First(&RateUser, body.ProfileID)
+
+	if user.ID == 0 {
+		c.AbortWithStatus(http.StatusUnauthorized)
+	}
+	if body.Answer == "like" {
+		err := initializers.DB.Exec("UPDATE users SET liked = array_append(liked, ?) WHERE id = ?", body.ProfileID, user.ID).Error
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to update liked array",
+			})
+			return
+		}
+
+		fmt.Println("RateUser liked array: ", RateUser.Liked, "user.ID: ", user.ID)
+
+		if utils.Contains(RateUser.Liked, int64(user.ID)) {
+			// Обновляем оба массива сразу
+			err = initializers.DB.Exec("UPDATE users SET matches = array_append(matches, ?) WHERE id = ?", user.ID, RateUser.ID).Error
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": "Failed to update matches",
+				})
+				return
+			}
+			err = initializers.DB.Exec("UPDATE users SET matches = array_append(matches, ?) WHERE id = ?", RateUser.ID, user.ID).Error
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{
+					"error": "Failed to update matches array",
+				})
+				return
+			}
+		}
+	} else if body.Answer == "dislike" {
+		err := initializers.DB.Exec("UPDATE users SET disliked = array_append(disliked, ?) WHERE id = ?", body.ProfileID, user.ID).Error
+
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to update disliked array",
+			})
+			return
+		}
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"message": "Failed to update rates",
 		})
 	}
 
-	if err := initializers.DB.First(&user, userFromReq); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Can't find user in Database",
-		})
-	}
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Rates updated successfully",
+	})
 
-	user.liked = append(user.liked, body.ProfileID)
-
-	if err := initializers.DB.Save(&user).Error; err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "Can't save changes",
-		})
-	}
 }

@@ -22,6 +22,7 @@ func main() {
 	r.POST("/login", controllers.Login)
 	r.GET("/validate", middleware.RequireAuth, controllers.Validate)
 	r.GET("/rate_users", middleware.RequireAuth, controllers.ShowRandomUser)
+	r.POST("/react", middleware.RequireAuth, controllers.HandleReaction)
 
 	r.Run()
 }
