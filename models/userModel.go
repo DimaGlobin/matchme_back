@@ -1,6 +1,8 @@
 package models
 
 import (
+	"time"
+
 	"github.com/lib/pq"
 	_ "gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -11,9 +13,19 @@ type User struct {
 	Email       string `gorm:"unique"`
 	Password    string
 	Sex         string
+	Age         int
+	BirthDate   time.Time
 	Location    string
-	Description string        `gorm:"type:TEXT"`
-	Liked       pq.Int64Array `gorm:"type:integer[]"`
-	Disliked    pq.Int64Array `gorm:"type:integer[]"`
-	Matches     pq.Int64Array `gorm:"type:integer[]"`
+	Description string `gorm:"type:TEXT"`
+	Rights      string
+	MaxAge      int
+	Radius      int
+	Liked       pq.Int64Array `gorm:"type:bigint[]"`
+	Disliked    pq.Int64Array `gorm:"type:bigint[]"`
+	Matches     pq.Int64Array `gorm:"type:bigint[]"`
+	Photos      []Photo
+	PhotoHashes pq.Int64Array `gorm:"type:bigint[]"`
+	LastIP      string
+	Latitude    float64
+	Longitude   float64
 }

@@ -1,7 +1,18 @@
 package controllers
 
+/*
+TODO:
+1) Добавить при генерации профиля ограничение в радиус, указанный пользователем в структуре (добавить в структуру поле с радиусом)
+2) Добавить ограничение лайков (50 в сутки для пользователя без подписки) (надо подумать)
+3) Сделать таблицу лайков для дальнеёшего её использования в рекомендательной системе
+4) Добавить, чтобы при удалении пользователя удалялись все его фото из системы
+5) Добавить максимальный возраст для поиска
+*/
+
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"time"
@@ -18,10 +29,11 @@ import (
 func SignUp(c *gin.Context) {
 	// Get the email/pas off req body
 	var body struct {
-		Email    string `json:"email" binding:"required"`
-		Password string `json:"password" binding:"required"`
-		Sex      string `json:"sex" binding:"required"`
-		Location string `json:"location" binding:"required"`
+		Email     string `json:"email" binding:"required"`
+		Password  string `json:"password" binding:"required"`
+		Sex       string `json:"sex" binding:"required"`
+		Location  string `json:"location" binding:"required"`
+		BirthDate string `json:"birthdate" binding:"required"`
 	}
 
 	if c.ShouldBindJSON(&body) != nil {
@@ -42,7 +54,23 @@ func SignUp(c *gin.Context) {
 	}
 	//Create the user
 
-	user := models.User{Email: body.Email, Password: string(hash), Sex: body.Sex, Location: body.Location}
+	bDate, err := utils.ParseDate(body.BirthDate)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Failed to parse date",
+		})
+		return
+	}
+
+	age := utils.CalculateAge(bDate)
+	if age < 18 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Age less than 18",
+		})
+		return
+	}
+
+	user := models.User{Email: body.Email, Password: string(hash), Sex: body.Sex, Location: body.Location, BirthDate: bDate, Age: age}
 	result := initializers.DB.Create(&user)
 
 	if result.Error != nil {
@@ -51,19 +79,46 @@ func SignUp(c *gin.Context) {
 		})
 		return
 	}
+
 	//Respond
 	c.JSON(http.StatusOK, gin.H{})
+}
+
+func GetLoaction(c *gin.Context) *models.LocationInfo {
+	// ip := c.ClientIP()
+	ip := "93.115.28.181"
+
+	apiURL := fmt.Sprintf("http://ip-api.com/json/%s", ip)
+	response, err := http.Get(apiURL)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return nil
+	}
+	defer response.Body.Close()
+
+	var location models.LocationInfo
+	if err := json.NewDecoder(response.Body).Decode(&location); err != nil {
+		fmt.Println("Error decoding JSON:", err)
+		return nil
+	}
+
+	location.LastIP = ip
+	fmt.Println("Location info: ", location)
+
+	return &location
 }
 
 func Login(c *gin.Context) {
 	//Get the email and pas off req body
 
+	location := GetLoaction(c)
+
 	var body struct {
-		Email    string
-		Password string
+		Email    string `json:"email" binding:"required"`
+		Password string `json:"password" binding:"required"`
 	}
 
-	if c.Bind(&body) != nil {
+	if c.ShouldBind(&body) != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "Failed to read body",
 		})
@@ -111,6 +166,22 @@ func Login(c *gin.Context) {
 		})
 	}
 
+	user.LastIP = location.LastIP
+	user.Longitude = location.Lon
+	user.Latitude = location.Lat
+
+	age := utils.CalculateAge(user.BirthDate)
+	if user.Age < age {
+		user.Age = age
+	}
+
+	result := initializers.DB.Save(user)
+	if result.Error != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "Failed to save info",
+		})
+	}
+
 	//Send it back
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("Authorization", tokenString, 3600*24*30, "", "", false, true)
@@ -126,7 +197,7 @@ func Validate(c *gin.Context) {
 	})
 }
 
-func getUserFromReq(c *gin.Context) (*models.User, interface{}) {
+func GetUserFromReq(c *gin.Context) (*models.User, interface{}) {
 	//Get the cookie of request
 
 	tokenString, err := c.Cookie("Authorization")
@@ -182,17 +253,16 @@ func getUserFromReq(c *gin.Context) (*models.User, interface{}) {
 func ShowRandomUser(c *gin.Context) {
 
 	var user *models.User
-	user, _ = getUserFromReq(c)
+	user, _ = GetUserFromReq(c)
 	var RateUser models.User
 
 	subQuery := fmt.Sprintf(`
         SELECT unnest(array_cat(liked, disliked)) FROM users WHERE id = %d
     `, user.ID)
 
-	// Выбираем случайного пользователя другого пола, которого еще не оценили
 	rows, err := initializers.DB.Raw(
-		"SELECT * FROM users WHERE sex != ? AND id != ? AND id NOT IN ("+subQuery+") AND deleted_at IS NULL ORDER BY RANDOM() LIMIT 1",
-		user.Sex, user.ID,
+		"SELECT * FROM users WHERE sex != ? AND id != ? AND id NOT IN ("+subQuery+") AND location = ? AND deleted_at IS NULL ORDER BY RANDOM() LIMIT 1",
+		user.Sex, user.ID, user.Location,
 	).Rows()
 
 	if err != nil {
@@ -208,13 +278,21 @@ func ShowRandomUser(c *gin.Context) {
 		break // Выход из цикла после первой строки
 	}
 
+	Distance := utils.VincentyDistance(user.Latitude, user.Longitude, RateUser.Latitude, RateUser.Longitude) / 1000
+	if math.IsNaN(Distance) {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed to calculate distance",
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": RateUser,
+		"user":     RateUser,
+		"distance": int(Distance),
 	})
 }
 
 func HandleReaction(c *gin.Context) {
-	_, claim := getUserFromReq(c)
+	_, claim := GetUserFromReq(c)
 
 	var user models.User
 	var RateUser models.User
@@ -285,5 +363,29 @@ func HandleReaction(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Rates updated successfully",
 	})
+}
 
+func DeleteUser(c *gin.Context) {
+	user, _ := GetUserFromReq(c)
+
+	result := initializers.DB.Unscoped().Delete(&user)
+	if result.Error != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "Failed delete user from database",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "User deleted successfully",
+	})
+}
+
+func Logout(c *gin.Context) {
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("Authorization", "", -1, "", "", false, true)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "Logged out successfully",
+	})
 }
