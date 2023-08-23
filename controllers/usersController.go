@@ -2,11 +2,8 @@ package controllers
 
 /*
 TODO:
-1) Добавить при генерации профиля ограничение в радиус, указанный пользователем в структуре (добавить в структуру поле с радиусом)
-2) Добавить ограничение лайков (50 в сутки для пользователя без подписки) (надо подумать)
+2) Добавить ограничение лайков (50 в сутки для пользователя без подписки)
 3) Сделать таблицу лайков для дальнеёшего её использования в рекомендательной системе
-4) Добавить, чтобы при удалении пользователя удалялись все его фото из системы
-5) Добавить максимальный возраст для поиска
 */
 
 import (
@@ -24,6 +21,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 	_ "gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 func SignUp(c *gin.Context) {
@@ -34,6 +32,8 @@ func SignUp(c *gin.Context) {
 		Sex       string `json:"sex" binding:"required"`
 		Location  string `json:"location" binding:"required"`
 		BirthDate string `json:"birthdate" binding:"required"`
+		MaxAge    int    `json:"maxage" binding:"required"`
+		Radius    int    `json:"radius" binding:"required"`
 	}
 
 	if c.ShouldBindJSON(&body) != nil {
@@ -70,7 +70,17 @@ func SignUp(c *gin.Context) {
 		return
 	}
 
-	user := models.User{Email: body.Email, Password: string(hash), Sex: body.Sex, Location: body.Location, BirthDate: bDate, Age: age}
+	user := models.User{
+		Email:    body.Email,
+		Password: string(hash),
+		Sex:      body.Sex, Location: body.Location,
+		BirthDate: bDate,
+		Age:       age,
+		MaxAge:    body.MaxAge,
+		Radius:    body.Radius,
+		Rights:    "DEFAULT",
+	}
+
 	result := initializers.DB.Create(&user)
 
 	if result.Error != nil {
@@ -261,8 +271,8 @@ func ShowRandomUser(c *gin.Context) {
     `, user.ID)
 
 	rows, err := initializers.DB.Raw(
-		"SELECT * FROM users WHERE sex != ? AND id != ? AND id NOT IN ("+subQuery+") AND location = ? AND deleted_at IS NULL ORDER BY RANDOM() LIMIT 1",
-		user.Sex, user.ID, user.Location,
+		"SELECT * FROM users WHERE sex != ? AND id != ? AND id NOT IN ("+subQuery+") AND location = ? AND deleted_at IS NULL AND max_age <= ? ORDER BY RANDOM() LIMIT 1",
+		user.Sex, user.ID, user.Location, user.MaxAge,
 	).Rows()
 
 	if err != nil {
@@ -367,8 +377,45 @@ func HandleReaction(c *gin.Context) {
 
 func DeleteUser(c *gin.Context) {
 	user, _ := GetUserFromReq(c)
+	var result *gorm.DB
+	var photo models.Photo
 
-	result := initializers.DB.Unscoped().Delete(&user)
+	for _, value := range user.PhotoHashes {
+		result = initializers.DB.First(&photo, "where hash = ?", value)
+		if result.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to find photo in database",
+			})
+			return
+		}
+
+		filePath := "../temp-files/" + photo.ImageName
+
+		if _, err := os.Stat(filePath); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to find photo in storage",
+			})
+			return
+		}
+
+		err := os.Remove(filePath)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to delete file from object storage",
+			})
+			return
+		}
+
+		result = initializers.DB.Unscoped().Delete(&photo)
+		if result.Error != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to delete file from database",
+			})
+			return
+		}
+	}
+
+	result = initializers.DB.Unscoped().Delete(&user)
 	if result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "Failed delete user from database",
