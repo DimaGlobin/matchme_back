@@ -10,6 +10,7 @@ import (
 
 	"github.com/DimaGlobin/matchme/initializers"
 	"github.com/DimaGlobin/matchme/models"
+	"github.com/DimaGlobin/matchme/services"
 	"github.com/DimaGlobin/matchme/utils"
 	"github.com/cheggaaa/pb/v3"
 	"github.com/gin-gonic/gin"
@@ -18,7 +19,7 @@ import (
 
 func UploadPhoto(c *gin.Context) {
 
-	user, _ := GetUserFromReq(c)
+	user, _ := services.GetUserFromReq(c)
 	var photo models.Photo
 
 	photoCount := initializers.DB.Model(&user).Association("Photos").Count()
@@ -159,7 +160,7 @@ func UploadPhoto(c *gin.Context) {
 }
 
 func GetPhoto(c *gin.Context) {
-	user, _ := GetUserFromReq(c)
+	user, _ := services.GetUserFromReq(c)
 
 	hashStr := c.Param("hash")
 
@@ -202,7 +203,7 @@ func GetPhoto(c *gin.Context) {
 }
 
 func DeletePhoto(c *gin.Context) {
-	user, _ := GetUserFromReq(c)
+	user, _ := services.GetUserFromReq(c)
 
 	hashStr := c.Param("hash")
 
